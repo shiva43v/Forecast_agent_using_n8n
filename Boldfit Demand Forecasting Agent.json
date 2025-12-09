@@ -1,0 +1,268 @@
+{
+  "name": "Boldfit Demand Forecasting Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "boldfit-forecast",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "2146d307-78c5-4a08-a6e6-3a8783b4c00e",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        2512,
+        1456
+      ],
+      "webhookId": "fd891056-8956-484a-83b9-753981f50e84"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get JSON data from webhook\nconst webhookData = $input.first().json;\n\n// Handle different possible data structures\nlet items;\nif (webhookData.body && webhookData.body.data) {\n  items = webhookData.body.data;\n} else if (webhookData.data) {\n  items = webhookData.data;\n} else if (Array.isArray(webhookData)) {\n  items = webhookData;\n} else {\n  throw new Error(\"Could not find sales data in webhook payload\");\n}\n\n// Group data by SKU\nconst skuData = {};\n\nfor (const item of items) {\n  const sku = item.sku;\n  if (!skuData[sku]) {\n    skuData[sku] = {\n      sku: sku,\n      sales: [],\n      dates: [],\n      currentStock: item.current_stock\n    };\n  }\n  skuData[sku].sales.push(Number(item.sales));\n  skuData[sku].dates.push(item.date);\n}\n\n// Calculate stats for each SKU\nconst skuSummaries = [];\n\nfor (const sku in skuData) {\n  const sales = skuData[sku].sales;\n  const total = sales.reduce((a, b) => a + b, 0);\n  const avg = total / sales.length;\n  const min = Math.min(...sales);\n  const max = Math.max(...sales);\n  \n  skuSummaries.push({\n    sku: sku,\n    totalSales: total,\n    avgDailySales: avg.toFixed(2),\n    minSales: min,\n    maxSales: max,\n    currentStock: skuData[sku].currentStock,\n    daysOfData: sales.length,\n    salesHistory: sales\n  });\n}\n\n// Build prompt for Gemini\nconst prompt = `You are a sales forecasting analyst. Analyze the following SKU sales data and provide:\n\n1. Sales Prediction: Predict daily sales for each SKU for the next 30 days\n2. Monthly Forecast: Total predicted sales for each SKU for the upcoming month\n3. Stock Alert: Flag if current stock will run out based on predictions\n4. Summary: Brief insights about sales trends\n\nHere is the historical sales data:\n\n${JSON.stringify(skuSummaries, null, 2)}\n\nProvide your response in this JSON format only, no extra text:\n{\n  \"predictions\": [\n    {\n      \"sku\": \"SKU101\",\n      \"predictedMonthlySales\": 4500,\n      \"avgDailyPrediction\": 150,\n      \"stockSufficient\": true,\n      \"daysUntilStockout\": null,\n      \"trend\": \"increasing\"\n    }\n  ],\n  \"summary\": \"your analysis summary here\",\n  \"recommendations\": [\"recommendation 1\", \"recommendation 2\"]\n}`;\n\nreturn [{\n  json: {\n    prompt: prompt,\n    skuSummaries: skuSummaries\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2736,
+        1456
+      ],
+      "id": "a2aff902-9e95-4189-9c34-e1f33d69c90a",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyA0yFw_BMh3jBF7CZR2Xz3ZjMT8AtMi93I",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "=Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "contents",
+              "value": "={{ $json.requestBody.contents }}"
+            },
+            {
+              "name": "generationConfig",
+              "value": "={{ $json.requestBody.generationConfig }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        3184,
+        1456
+      ],
+      "id": "febca71b-ee33-4726-8df9-5ee3522f6725",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "jsCode": "const prompt = $input.first().json.prompt;\nconst skuSummaries = $input.first().json.skuSummaries;\n\nconst requestBody = {\n  contents: [\n    {\n      parts: [\n        {\n          text: prompt\n        }\n      ]\n    }\n  ],\n  generationConfig: {\n    temperature: 0.3,\n    maxOutputTokens: 2048\n  }\n};\n\nreturn [{\n  json: {\n    requestBody: requestBody,\n    skuSummaries: skuSummaries\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2960,
+        1456
+      ],
+      "id": "a67c5d96-75be-4c06-970a-f756dabc5846",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get Gemini response\nconst response = $input.first().json;\n\n// Extract text from response\nconst text = response.candidates[0].content.parts[0].text;\n\n// Remove markdown code blocks (```json and ```)\nconst cleanText = text.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n\n// Parse JSON\nlet parsed;\ntry {\n  parsed = JSON.parse(cleanText);\n} catch (e) {\n  return [{\n    json: {\n      error: \"Failed to parse response\",\n      rawText: text\n    }\n  }];\n}\n\n// Return clean formatted output\nreturn [{\n  json: {\n    predictions: parsed.predictions,\n    summary: parsed.summary,\n    recommendations: parsed.recommendations,\n    generatedAt: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3408,
+        1456
+      ],
+      "id": "785b8cd4-8f5f-4e41-ba25-653a4911f943",
+      "name": "Code in JavaScript2"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\n// Build paragraph report\nlet report = `SALES FORECAST REPORT\\n`;\nreport += `Generated: ${data.generatedAt}\\n\\n`;\nreport += `SUMMARY:\\n${data.summary}\\n\\n`;\nreport += `PREDICTIONS:\\n`;\n\nfor (const pred of data.predictions) {\n  report += `\\n${pred.sku}:\\n`;\n  report += `  - Predicted Monthly Sales: ${pred.predictedMonthlySales}\\n`;\n  report += `  - Average Daily Prediction: ${pred.avgDailyPrediction}\\n`;\n  report += `  - Trend: ${pred.trend}\\n`;\n  report += `  - Stock Sufficient: ${pred.stockSufficient ? 'Yes' : 'No'}\\n`;\n  report += `  - Days Until Stockout: ${pred.daysUntilStockout || 'N/A'}\\n`;\n}\n\nreport += `\\nRECOMMENDATIONS:\\n`;\ndata.recommendations.forEach((rec, i) => {\n  report += `${i + 1}. ${rec}\\n`;\n});\n\nreturn [{\n  json: {\n    report: report\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3632,
+        1552
+      ],
+      "id": "24a1a620-08fa-47f8-b977-04ccbbd7c2c6",
+      "name": "Code in JavaScript3"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "30af1f71-fe48-48f4-bd4d-ec0a12b89d1d",
+      "name": "Send JSON Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        3632,
+        1360
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "<__PLACEHOLDER_VALUE__Google Sheets Document ID__>",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "<__PLACEHOLDER_VALUE__Sheet Name (e.g., Sheet1)__>"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "7f5a2305-0837-4599-be4f-e3f3c15180c4",
+      "name": "Save to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        3920,
+        1648
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "sendTo": "<__PLACEHOLDER_VALUE__Recipient Email Address__>",
+        "subject": "=Sales Forecast Report - {{ $now.format('YYYY-MM-DD') }}",
+        "message": "={{ $json.report }}",
+        "options": {}
+      },
+      "id": "b886ddac-20cf-431b-a34d-b2227c02ace4",
+      "name": "Send Email Report",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        3904,
+        1456
+      ],
+      "webhookId": "93009d7b-a19c-4db1-9416-95d0590ba4dc",
+      "disabled": true
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript2": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript3",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send JSON Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript3": {
+      "main": [
+        [
+          {
+            "node": "Save to Google Sheets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Email Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "39ab0be7-8ebb-404b-9507-c6dc51630b55",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "a342915d25ab063c2498b9c4e10662a221d4b4e8b095165df077ab2fd4283143"
+  },
+  "id": "4mLQqw2Cuo7lmcb3",
+  "tags": []
+}
